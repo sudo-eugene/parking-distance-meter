@@ -1,0 +1,194 @@
+substitutions:
+  id: k062hx # Generated a random ID
+  name: parking-sensor
+  friendly_name: Parking Distance Meter v3
+  update_interval: "0.15s"
+  
+  # GPIO Pin assignments
+  echo_pin: GPIO5   # D1 on D1 Mini
+  trigger_pin: GPIO4 # D2 on D1 Mini
+  relay_pin: GPIO14   # D5 on D1 Mini
+  clk_pin: GPIO12   # D6 on D1 Mini
+  dio_pin: GPIO13   # D7 on D1 Mini
+  
+  # Sensor configuration
+  max_distance: "1.5"           # Maximum valid distance in metres
+  pulse_duration: "20us"
+  
+  # Display configuration
+  display_update_interval: "0.15s"
+  
+  # Relay configuration
+  debounce_time: "1000"          # milliseconds
+  static_timeout: "300000"      # 5 minutes in milliseconds
+  static_diff: "2.0"            # cm difference to consider "static"
+
+  # Unique Vars
+  wifi_fallback_password: "Q...I" # Set the wifi fallback password
+  ota_password: "4...1" # This will be generated once you adopt the device into Home Assistant
+  encryption_key: "r...=" # https://esphome.io/components/api.html#configuration-variables
+  
+
+esphome:
+  name: ${name}-${id}
+  friendly_name: ${friendly_name} ${id}
+  min_version: 2024.6.0
+  name_add_mac_suffix: false
+  project:
+    name: esphome.web
+    version: '1.0'
+
+esp8266:
+  board: d1_mini
+
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: ${encryption_key}
+
+ota:
+  - platform: esphome
+    password: ${ota_password}
+
+improv_serial:
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Parking Sensor ${id} Fallback"
+    password: ${wifi_fallback_password}
+
+captive_portal:
+
+dashboard_import:
+  package_import_url: github://esphome/example-configs/esphome-web/esp8266.yaml@main
+  import_full_config: true
+
+web_server:
+
+sensor:
+  - platform: ultrasonic
+    trigger_pin: ${trigger_pin}
+    echo_pin: ${echo_pin}
+    name: "${friendly_name} Distance"
+    update_interval: ${update_interval}
+    pulse_time: ${pulse_duration}
+    # timeout: ${max_distance}m  # Increased timeout to support measurements up to 3m.
+    timeout: 5m  # Increased timeout to support measurements up to 3m.
+    filters:
+      - median:
+          window_size: 3
+          send_every: 1
+      - lambda: |-
+          // Pass through all readings (in metres) converting to centimetres.
+          if (isnan(x)) {
+            return {};
+          }
+          return x * 100.0;
+    unit_of_measurement: "cm"
+    id: distance_sensor
+
+switch:
+  - platform: gpio
+    pin: ${relay_pin}
+    id: parking_sensor_relay
+    name: "${friendly_name} Relay Switch"
+    inverted: true
+    restore_mode: ALWAYS_ON
+
+display:
+  - platform: tm1637
+    id: led_display
+    clk_pin: ${clk_pin}
+    dio_pin: ${dio_pin}
+    update_interval: ${display_update_interval}
+    lambda: |-
+      auto distance = id(distance_sensor).state;
+      if (!isnan(distance)) {
+        // Display the true value.
+        it.printf("%4.0f", distance);
+      }
+
+interval:
+  - interval: 150ms
+    then:
+      - lambda: |-
+          // ------------------------------------------------
+          // --- CONFIGURABLE PARAMETERS
+          // ------------------------------------------------
+          const float DISTANCE_THRESHOLD_CM = ${max_distance} * 100.0f;
+          const unsigned long DEBOUNCE_MS = ${debounce_time};
+          const unsigned long STATIC_TIMEOUT_MS = ${static_timeout};
+          const float STATIC_DIFF_CM = ${static_diff};
+
+          // Relay logic: Relay ON = display OFF, Relay OFF = display ON.
+          static bool relay_state = false;
+          static unsigned long last_change_time = 0;
+          static float stable_baseline = NAN;
+          static unsigned long stable_since = 0;
+          static bool in_static_timeout = false;  // Track if we're in static timeout mode
+          static bool was_over_threshold = false;  // Track previous over-threshold state
+          static unsigned long over_threshold_since = 0;  // Track when distance exceeded threshold
+
+          float distance = id(distance_sensor).state;
+          if (isnan(distance)) {
+            return;
+          }
+
+          // ------------------------------------------------------------------
+          // 1) Handle max distance threshold with debouncing
+          // ------------------------------------------------------------------
+          bool is_over_threshold = distance > DISTANCE_THRESHOLD_CM;
+          unsigned long current_time = millis();
+          
+          // State change detection for over-threshold
+          if (is_over_threshold != was_over_threshold) {
+            over_threshold_since = current_time;
+            was_over_threshold = is_over_threshold;
+          }
+          
+          // Handle the over-threshold condition
+          if (is_over_threshold) {
+            if (current_time - over_threshold_since >= DEBOUNCE_MS) {
+              // Turn display OFF when distance > max_distance (with debounce)
+              id(parking_sensor_relay).turn_off();
+              relay_state = false;
+              last_change_time = current_time;
+              in_static_timeout = false;  // Reset static timeout when out of range
+              return;
+            }
+          } else if (!is_over_threshold && !relay_state) {
+            // Turn display back ON when distance <= max_distance
+            id(parking_sensor_relay).turn_on();
+            relay_state = true;
+          }
+          
+          // ------------------------------------------------
+          // 2) Update "static" detection for distances ≤ max_distance.
+          // ------------------------------------------------
+          float diff = fabs(distance - stable_baseline);
+          if (isnan(stable_baseline) || diff > STATIC_DIFF_CM) {
+            stable_baseline = distance;
+            stable_since = millis();
+            in_static_timeout = false;  // Reset static timeout when movement detected
+          }
+
+          // ------------------------------------------------
+          // 3) Determine relay state based on static timeout
+          // ------------------------------------------------
+          bool stable_for_timeout = (millis() - stable_since >= STATIC_TIMEOUT_MS);
+          
+          if (stable_for_timeout && !in_static_timeout) {
+            // Just reached static timeout - turn display off
+            id(parking_sensor_relay).turn_off();
+            relay_state = false;
+            in_static_timeout = true;
+          } else if (!stable_for_timeout && !in_static_timeout) {
+            // Normal operation - display should be on when within range
+            id(parking_sensor_relay).turn_on();
+            relay_state = true;
+          }
+          // Stay in current state if in static timeout until movement is detected
