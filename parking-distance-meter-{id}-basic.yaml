@@ -10,22 +10,18 @@ substitutions:
   clk_pin: GPIO13   # D7 on D1 Mini
 
   # Settings
-  update_interval: "0.05s"
+  update_interval: "0.1s"
   display_intensity: "7"
   
   # Security
-  wifi_fallback_password: "M0gj8OUiQCbA" # Set the wifi fallback password
-  ota_password: "72f3769daa87b8b198f86d1f0a49a92d" 
-  encryption_key: "zs6xnOerLgnyq2ab6RhoBJeaQa7hVgIzntAs4xAMO40="
+  wifi_fallback_password: "M..A" # Set the wifi fallback password
+  ota_password: "7..d" 
+  encryption_key: "z..="
 
 esphome:
   name: ${name}-${id}
   friendly_name: ${friendly_name} ${id}
   min_version: 2024.6.0
-  name_add_mac_suffix: false
-  project:
-    name: esphome.web
-    version: '1.0'
 
 esp8266:
   board: esp01_1m
@@ -53,29 +49,29 @@ wifi:
 
 captive_portal:
 
-dashboard_import:
-  package_import_url: github://esphome/example-configs/esphome-web/esp8266.yaml@main
-  import_full_config: true
 
 sensor:
   - platform: ultrasonic
+    id: ultrasonic_distance
     trigger_pin: ${trigger_pin}
     echo_pin: ${echo_pin}
-    id: distance_sensor
-    name: "Distance"
-    update_interval: ${update_interval}
+    name: "${friendly_name} Distance"
     unit_of_measurement: "m"
+    update_interval: ${update_interval}
+    # timeout defaults to sensor max range (~2m). Adjust if needed.
+    timeout: 2m
     accuracy_decimals: 3
 
+# TM1637 display configuration to show the raw sensor reading
 display:
   - platform: tm1637
     id: led_display
     clk_pin: ${clk_pin}
     dio_pin: ${dio_pin}
-    update_interval: ${update_interval}
     intensity: ${display_intensity}
+    update_interval: ${update_interval}
     lambda: |-
-      float distance_m = id(distance_sensor).state;
+      float distance_m = id(ultrasonic_distance).state;
       if (isnan(distance_m)) {
         it.print("----");
       } else {
