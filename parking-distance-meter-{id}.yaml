@@ -12,7 +12,7 @@ substitutions:
 
 
   # Display configuration
-  display_update_interval: "0.15s"  
+  display_update_interval: "0.10s"  
 
   # Unique Vars
   wifi_fallback_password: "..." # Set the wifi fallback password
@@ -72,10 +72,6 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
-  - id: g_consecutive_valid_readings
-    type: int
-    restore_value: no
-    initial_value: '0'
 
 script:
   - id: turn_on_relay
@@ -96,30 +92,48 @@ sensor:
     id: ultrasonic_sensor
     update_interval: ${display_update_interval}
     filters:
-      - multiply: 100 # convert from m to cm
+      # Step 1: Replace timeouts (nan) with a large number.
+      # This ensures the median filter works correctly, as it can't process 'nan'.
+      # We use a value (3.0m) far beyond our actual 1.5m threshold.
+      - lambda: |-
+          if (isnan(x)) {
+            return 3.0;
+          } else {
+            return x;
+          }
+      # Step 2: Smooth the signal to eliminate single spurious readings.
+      # A single incorrect reading (e.g., 0.5m) in a series of far readings (3.0m)
+      # will be filtered out by the median.
+      - median:
+          window_size: 7
+          send_every: 1
+      # Step 3: Apply the hard cutoff. Any value (real or from the median)
+      # greater than 1.5m is converted back to 'nan' to signify "out of range".
+      - lambda: |-
+          if (x > 1.5) {
+            return NAN;
+          } else {
+            return x;
+          }
+      # Step 4: Convert the clean, valid, in-range value from meters to centimeters.
+      - multiply: 100
     on_value:
       then:
         - lambda: |-
-            bool is_valid_now = (x <= 150 && !isnan(x));
+            bool is_valid_now = !isnan(x);
             bool was_valid_before = id(g_last_reading_is_valid);
 
             if (is_valid_now) {
-              id(g_consecutive_valid_readings)++;
-              bool has_changed = abs(x - id(g_last_distance)) > 2;
-
-              if ((!was_valid_before && id(g_consecutive_valid_readings) >= 3) || (was_valid_before && has_changed)) {
+              // Check for a significant change or if the sensor is newly valid
+              if (!was_valid_before || abs(x - id(g_last_distance)) > 2) {
                 id(turn_on_relay).execute();
                 id(turn_off_relay_if_idle).stop();
                 id(turn_off_relay_if_idle).execute();
-                id(g_last_distance) = x;
               }
-            } else {
-              id(g_consecutive_valid_readings) = 0;
-              if (was_valid_before) {
-                id(turn_off_relay_if_idle).stop();
-                id(turn_off_relay_if_idle).execute();
-              }
+              id(g_last_distance) = x;
             }
+            // No 'else' needed. If the reading is invalid, the 10s timer
+            // started by the last valid reading will handle turning the relay off.
             id(g_last_reading_is_valid) = is_valid_now;
 
 # 7-Segment Display
@@ -131,7 +145,7 @@ display:
     intensity: 7
     update_interval: ${display_update_interval}
     lambda: |-
-      if (id(ultrasonic_sensor).has_state() && !isnan(id(ultrasonic_sensor).state) && id(ultrasonic_sensor).state <= 150) {
+      if (id(ultrasonic_sensor).has_state() && !isnan(id(ultrasonic_sensor).state)) {
         it.printf("%4.0f", id(ultrasonic_sensor).state);
       } else {
         it.print("----");
