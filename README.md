@@ -1,85 +1,62 @@
-# parking-distance-meter
+# Parking Distance Meter v4
 
-## Overview
-The Parking Distance Meter is an ESP8266-based device that helps with parking by displaying the distance to nearby objects. It uses an ultrasonic sensor to measure distance and displays it on a 7-segment LED display. The device automatically turns off the display when the car is out of range or when the distance has remained static for a set period.
+This project is an intelligent ultrasonic parking sensor built with a WEMOS D1 Mini, an HC-SR04 ultrasonic sensor, a TM1637 7-segment display, and a relay. It is designed to provide accurate distance measurements and intelligently control a connected device (e.g., a light or buzzer) via the relay.
 
-## Hardware Requirements
-- ESP8266 board (D1 Mini recommended)
-- Ultrasonic distance sensor (HC-SR04 or similar)
-- TM1637 7-segment LED display
-- Relay module
-- Power supply
+## Hardware
 
-## Pin Configuration
-The default pin configuration in the YAML file is:
-- Echo Pin: GPIO5 (D1 on D1 Mini)
-- Trigger Pin: GPIO4 (D2 on D1 Mini)
-- Relay Pin: GPIO14 (D5 on D1 Mini)
-- CLK Pin: GPIO12 (D6 on D1 Mini)
-- DIO Pin: GPIO13 (D7 on D1 Mini)
+*   **Microcontroller:** WEMOS D1 Mini (ESP8266)
+*   **Distance Sensor:** [HC-SR04 Ultrasonic Sensor](https://esphome.io/components/sensor/ultrasonic.html)
+*   **Display:** [TM1637 7-Segment Display](https://esphome.io/components/display/tm1637.html)
+*   **Switch:** A 5V Relay Module
 
-## Configuration File
-The `parking-distance-meter-{id}.yaml` file is an ESPHome configuration file that defines how the device works. To use it:
+## ESPHome Configuration Explained
 
-1. Replace `{id}` in the filename with your unique device ID (e.g., `parking-distance-meter-k062hx.yaml`)
-2. Customize the configuration parameters as needed
+This project is configured using a single YAML file for [ESPHome](https://esphome.io/).
 
-### Key Configuration Parameters
+### Core Components
 
-#### Device Identification
-- `id`: Unique identifier for the device (e.g., "k062hx")
-- `name`: Base name for the device (default: "parking-sensor")
-- `friendly_name`: Human-readable name (default: "Parking Distance Meter v3")
+*   **`substitutions`**: This section defines variables for GPIO pins and other settings, making the configuration clean and easy to modify.
+*   **`esp8266`**: Configures the project for the WEMOS D1 Mini board.
+*   **`api`**, **`ota`**, **`wifi`**: Standard ESPHome components for connecting to Home Assistant, enabling over-the-air updates, and connecting to your Wi-Fi network.
 
-#### Sensor Configuration
-- `update_interval`: How often the sensor takes measurements (default: 0.15s)
-- `max_distance`: Maximum valid distance in meters (default: 1.5m)
-- `pulse_duration`: Duration of ultrasonic pulse (default: 20μs)
+### Sensor: Ultrasonic Distance (`HC-SR04`)
 
-#### Display Configuration
-- `display_update_interval`: How often the display updates (default: 0.15s)
+This is the primary input for the system.
 
-#### Relay Configuration
-- `debounce_time`: Time in milliseconds to debounce sensor readings (default: 1000ms)
-- `static_timeout`: Time in milliseconds after which the display turns off if the distance remains static (default: 300000ms = 5 minutes)
-- `static_diff`: Minimum difference in cm to consider the distance as changed (default: 2.0cm)
+*   **`platform: ultrasonic`**: Defines the sensor type.
+*   **`update_interval: 0.15s`**: The sensor takes a new distance measurement every 150 milliseconds, ensuring high responsiveness.
+*   **`filters`**: A `multiply: 100` filter converts the sensor's output from meters to centimeters.
+*   **`on_value`**: This is the core automation block that runs every time the sensor produces a new value. It contains the logic for the intelligent relay control.
 
-#### Network Configuration
-- `wifi_fallback_password`: Password for the fallback AP mode
-- `ota_password`: Password for OTA updates
-- `encryption_key`: Key for encrypted communication with Home Assistant
+### Display: 7-Segment (`TM1637`)
 
-## How It Works
+This provides visual feedback to the user.
 
-### Distance Measurement
-The device uses an ultrasonic sensor to measure the distance to objects. The measurements are:
-- Taken at regular intervals (defined by `update_interval`)
-- Filtered using a median filter to reduce noise
-- Converted from meters to centimeters for display
+*   **`platform: tm1637`**: Defines the display type.
+*   **`update_interval: 0.15s`**: The display refreshes at the same rate as the sensor, ensuring the displayed value is always current.
+*   **`lambda`**: A small C++ script controls what is shown on the display. It checks if the sensor reading is valid and within the 150cm range. If it is, the distance is displayed; otherwise, it shows "----" to indicate an out-of-range or invalid reading.
 
-### Display Logic
-The 7-segment display shows the current distance in centimeters. The display behavior is controlled by several mechanisms:
+### Switch: Relay Control
 
-1. **Maximum Distance Threshold**:
-   - When the measured distance exceeds `max_distance`, the display turns off after `debounce_time` milliseconds
-   - When the distance returns below `max_distance`, the display turns back on
+The relay is configured as a simple [GPIO Switch](https://esphome.io/components/switch/gpio.html).
 
-2. **Static Distance Detection**:
-   - The device tracks if the distance remains stable (changes less than `static_diff` cm)
-   - If the distance remains static for longer than `static_timeout` (5 minutes by default), the display turns off
-   - Any significant movement resets this timer and turns the display back on
+*   **`inverted: true`**: This may be required depending on your relay module's logic (whether a HIGH or LOW signal turns it on).
+*   **`restore_mode: RESTORE_DEFAULT_OFF`**: Ensures the relay is in a predictable OFF state when the device boots up, allowing the automation to take full control.
 
-### Network Connectivity
-The device connects to your home network and integrates with Home Assistant:
-- Supports OTA updates
-- Provides a web server interface
-- Creates a fallback access point if WiFi connection fails
-- Integrates with Home Assistant via the ESPHome API
+### Intelligent Automation Logic
 
-## Home Assistant Integration
-The device exposes:
-- A sensor entity for the measured distance
-- A switch entity to control the relay/display manually
+To prevent the relay from activating on momentary false readings and to turn it off when idle, we use a combination of global variables, scripts, and an `on_value` automation.
 
-## Customization
-To customize the device for your needs, modify the substitution variables at the top of the YAML file before flashing it to your ESP8266 device.
+*   **`globals`**: We use three [Global Variables](https://esphome.io/components/globals.html) to track the state between sensor readings:
+    *   `g_last_distance`: Stores the last valid distance.
+    *   `g_last_reading_is_valid`: Remembers if the previous reading was valid.
+    *   `g_consecutive_valid_readings`: Counts how many valid readings have occurred in a row.
+
+*   **`script`**: Two [Scripts](https://esphome.io/components/script.html) handle the relay actions:
+    *   `turn_on_relay`: A simple script to turn the relay on.
+    *   `turn_off_relay_if_idle`: A script that waits 10 seconds and then turns the relay off. This script can be restarted, which is key to the timeout logic.
+
+*   **`on_value` Automation Logic**:
+    1.  **From Invalid to Valid:** If the display was showing "----", the system requires **3 consecutive valid readings** before it will turn the relay ON. This filters out single, inaccurate "blips".
+    2.  **During Valid Readings:** If the sensor is already showing a valid distance, the relay will activate instantly if the distance changes by more than 2 cm, ensuring responsiveness to genuine movement.
+    3.  **Idle Timeout:** The `turn_off_relay_if_idle` script is triggered whenever the readings become stable (no significant change) or invalid. If no new activity occurs within 10 seconds, the relay turns OFF.

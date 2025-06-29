@@ -1,32 +1,23 @@
 substitutions:
-  id: k062hx # Generated a random hex - https://numbergenerator.org/hex-code-generator
+  id: bk8a3 # Generated a random hex - https://numbergenerator.org/hex-code-generator
   name: parking-distance-meter
-  friendly_name: Parking Distance Meter v3
-  update_interval: "0.15s"
+  friendly_name: Parking Distance Meter v4
+
   # GPIO Pin assignments
   echo_pin: GPIO5   # D1 on D1 Mini
   trigger_pin: GPIO4 # D2 on D1 Mini
   relay_pin: GPIO14   # D5 on D1 Mini
-  clk_pin: GPIO12   # D6 on D1 Mini
-  dio_pin: GPIO13   # D7 on D1 Mini
-  
-  # Sensor configuration
-  max_distance: "1.5"           # Maximum valid distance in metres
-  max_distance_timeout: "2.5m"   # max_distance + 1m for timeout (manually calculated)
-  pulse_duration: "20us"
-  
+  dio_pin: GPIO12   # D6 on D1 Mini
+  clk_pin: GPIO13   # D7 on D1 Mini
+
+
   # Display configuration
-  display_update_interval: "0.15s"
-  
-  # Relay configuration
-  debounce_time: "500"          # milliseconds
-  static_timeout: "300000"      # 5 minutes in milliseconds
-  static_diff: "2.0"            # cm difference to consider "static"
+  display_update_interval: "0.15s"  
 
   # Unique Vars
-  wifi_fallback_password: "Q..I" # Set the wifi fallback password
-  ota_password: "4..1" # This will be generated once you adopt the device into Home Assistant
-  encryption_key: "r.." # https://esphome.io/components/api.html#configuration-variables
+  wifi_fallback_password: "..." # Set the wifi fallback password
+  ota_password: "..." # This will be generated once you adopt the device into Home Assistant
+  encryption_key: "..." # https://esphome.io/components/api.html#configuration-variables
 
 
 esphome:
@@ -39,7 +30,7 @@ esphome:
     version: '1.0'
 
 esp8266:
-  board: esp01_1m
+  board: d1_mini
 
 # Enable logging
 logger:
@@ -70,109 +61,87 @@ dashboard_import:
   package_import_url: github://esphome/example-configs/esphome-web/esp8266.yaml@main
   import_full_config: true
 
-web_server:
+web_server:  
 
+globals:
+  - id: g_last_distance
+    type: float
+    restore_value: no
+    initial_value: '-1.0'
+  - id: g_last_reading_is_valid
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: g_consecutive_valid_readings
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+script:
+  - id: turn_on_relay
+    then:
+      - switch.turn_on: parking_sensor_relay
+  - id: turn_off_relay_if_idle
+    mode: single
+    then:
+      - delay: 10s
+      - switch.turn_off: parking_sensor_relay
+
+# Ultrasonic Sensor
 sensor:
   - platform: ultrasonic
     trigger_pin: ${trigger_pin}
     echo_pin: ${echo_pin}
-    name: "${friendly_name} Distance"
-    update_interval: ${update_interval}
-    pulse_time: ${pulse_duration}
-    timeout: ${max_distance_timeout}
+    name: "Ultrasonic Distance"
+    id: ultrasonic_sensor
+    update_interval: ${display_update_interval}
     filters:
-      - median:
-          window_size: 3
-          send_every: 1
-      - lambda: |-
-          // Pass through all readings (in metres) converting to centimetres.
-          if (isnan(x)) {
-            return {};
-          }
-          return x * 100.0;
-    unit_of_measurement: "cm"
-    id: distance_sensor
+      - multiply: 100 # convert from m to cm
+    on_value:
+      then:
+        - lambda: |-
+            bool is_valid_now = (x <= 150 && !isnan(x));
+            bool was_valid_before = id(g_last_reading_is_valid);
 
+            if (is_valid_now) {
+              id(g_consecutive_valid_readings)++;
+              bool has_changed = abs(x - id(g_last_distance)) > 2;
+
+              if ((!was_valid_before && id(g_consecutive_valid_readings) >= 3) || (was_valid_before && has_changed)) {
+                id(turn_on_relay).execute();
+                id(turn_off_relay_if_idle).stop();
+                id(turn_off_relay_if_idle).execute();
+                id(g_last_distance) = x;
+              }
+            } else {
+              id(g_consecutive_valid_readings) = 0;
+              if (was_valid_before) {
+                id(turn_off_relay_if_idle).stop();
+                id(turn_off_relay_if_idle).execute();
+              }
+            }
+            id(g_last_reading_is_valid) = is_valid_now;
+
+# 7-Segment Display
+display:
+  - platform: tm1637
+    id: tm1637_display
+    clk_pin: ${clk_pin}
+    dio_pin: ${dio_pin}
+    intensity: 7
+    update_interval: ${display_update_interval}
+    lambda: |-
+      if (id(ultrasonic_sensor).has_state() && !isnan(id(ultrasonic_sensor).state) && id(ultrasonic_sensor).state <= 150) {
+        it.printf("%4.0f", id(ultrasonic_sensor).state);
+      } else {
+        it.print("----");
+      }
+
+# Relay Switch
 switch:
   - platform: gpio
     pin: ${relay_pin}
     id: parking_sensor_relay
     name: "${friendly_name} Relay Switch"
     inverted: true
-    restore_mode: ALWAYS_ON
-
-display:
-  - platform: tm1637
-    id: led_display
-    clk_pin: ${clk_pin}
-    dio_pin: ${dio_pin}
-    update_interval: ${display_update_interval}
-    lambda: |-
-      auto distance = id(distance_sensor).state;
-      if (!isnan(distance)) {
-        // Display the true value.
-        it.printf("%4.0f", distance);
-      }
-
-interval:
-  - interval: 150ms
-    then:
-      - lambda: |-
-          // ------------------------------------------------
-          // --- CONFIGURABLE PARAMETERS
-          // ------------------------------------------------
-          const float DISTANCE_THRESHOLD_CM = ${max_distance} * 100.0f;
-          const unsigned long DEBOUNCE_MS = ${debounce_time};
-          const unsigned long STATIC_TIMEOUT_MS = ${static_timeout};
-          const float STATIC_DIFF_CM = ${static_diff};
-
-          // Relay logic: Relay ON = display OFF, Relay OFF = display ON.
-          static bool relay_state = false;
-          static unsigned long last_change_time = 0;
-          static float stable_baseline = NAN;
-          static unsigned long stable_since = 0;
-          static bool in_static_timeout = false;  // Track if we're in static timeout mode
-
-          float distance = id(distance_sensor).state;
-          if (isnan(distance)) {
-            return;
-          }
-
-          // ------------------------------------------------------------------
-          // 1) Immediately force relay off if measured distance exceeds max_distance.
-          // ------------------------------------------------------------------
-          if (distance > DISTANCE_THRESHOLD_CM) {
-            // Turn display OFF when distance > max_distance
-            id(parking_sensor_relay).turn_off();
-            relay_state = false;
-            last_change_time = millis();
-            in_static_timeout = false;  // Reset static timeout when out of range
-            return;
-          } 
-          
-          // ------------------------------------------------
-          // 2) Update "static" detection for distances ≤ max_distance.
-          // ------------------------------------------------
-          float diff = fabs(distance - stable_baseline);
-          if (isnan(stable_baseline) || diff > STATIC_DIFF_CM) {
-            stable_baseline = distance;
-            stable_since = millis();
-            in_static_timeout = false;  // Reset static timeout when movement detected
-          }
-
-          // ------------------------------------------------
-          // 3) Determine relay state based on static timeout
-          // ------------------------------------------------
-          bool stable_for_timeout = (millis() - stable_since >= STATIC_TIMEOUT_MS);
-          
-          if (stable_for_timeout && !in_static_timeout) {
-            // Just reached static timeout - turn display off
-            id(parking_sensor_relay).turn_off();
-            relay_state = false;
-            in_static_timeout = true;
-          } else if (!stable_for_timeout && !in_static_timeout) {
-            // Normal operation - display should be on when within range
-            id(parking_sensor_relay).turn_on();
-            relay_state = true;
-          }
-          // Stay in current state if in static timeout until movement is detected
+    restore_mode: RESTORE_DEFAULT_OFF
