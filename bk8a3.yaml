@@ -1,0 +1,147 @@
+substitutions:
+  id: bk8a3 # Generated a random hex - https://numbergenerator.org/hex-code-generator
+  name: parking-distance-meter
+  friendly_name: Parking Distance Meter v4
+
+  # GPIO Pin assignments
+  echo_pin: GPIO5   # D1 on D1 Mini
+  trigger_pin: GPIO4 # D2 on D1 Mini
+  relay_pin: GPIO14   # D5 on D1 Mini
+  dio_pin: GPIO12   # D6 on D1 Mini
+  clk_pin: GPIO13   # D7 on D1 Mini
+
+
+  # Display configuration
+  display_update_interval: "0.15s"  
+
+  # Unique Vars
+  wifi_fallback_password: "..." # Set the wifi fallback password
+  ota_password: "..." # This will be generated once you adopt the device into Home Assistant
+  encryption_key: "..." # https://esphome.io/components/api.html#configuration-variables
+
+
+esphome:
+  name: ${name}-${id}
+  friendly_name: ${friendly_name} ${id}
+  min_version: 2024.6.0
+  name_add_mac_suffix: false
+  project:
+    name: esphome.web
+    version: '1.0'
+
+esp8266:
+  board: d1_mini
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+# Generate an encryption key at https://esphome.io/components/api.html#:~:text=to%206053.-,encryption,-(Optional)%3A%20Enable
+api:
+  encryption:
+    key: ${encryption_key}
+
+ota:
+  - platform: esphome
+    password: ${ota_password}
+
+improv_serial:
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Parking Sensor ${id} Fallback"
+    password: ${wifi_fallback_password}
+
+captive_portal:
+
+dashboard_import:
+  package_import_url: github://esphome/example-configs/esphome-web/esp8266.yaml@main
+  import_full_config: true
+
+web_server:  
+
+globals:
+  - id: g_last_distance
+    type: float
+    restore_value: no
+    initial_value: '-1.0'
+  - id: g_last_reading_is_valid
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: g_consecutive_valid_readings
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+script:
+  - id: turn_on_relay
+    then:
+      - switch.turn_on: parking_sensor_relay
+  - id: turn_off_relay_if_idle
+    mode: single
+    then:
+      - delay: 10s
+      - switch.turn_off: parking_sensor_relay
+
+# Ultrasonic Sensor
+sensor:
+  - platform: ultrasonic
+    trigger_pin: ${trigger_pin}
+    echo_pin: ${echo_pin}
+    name: "Ultrasonic Distance"
+    id: ultrasonic_sensor
+    update_interval: ${display_update_interval}
+    filters:
+      - multiply: 100 # convert from m to cm
+    on_value:
+      then:
+        - lambda: |-
+            bool is_valid_now = (x <= 150 && !isnan(x));
+            bool was_valid_before = id(g_last_reading_is_valid);
+
+            if (is_valid_now) {
+              id(g_consecutive_valid_readings)++;
+              bool has_changed = abs(x - id(g_last_distance)) > 2;
+
+              if ((!was_valid_before && id(g_consecutive_valid_readings) >= 3) || (was_valid_before && has_changed)) {
+                id(turn_on_relay).execute();
+                id(turn_off_relay_if_idle).stop();
+                id(turn_off_relay_if_idle).execute();
+                id(g_last_distance) = x;
+              }
+            } else {
+              id(g_consecutive_valid_readings) = 0;
+              if (was_valid_before) {
+                id(turn_off_relay_if_idle).stop();
+                id(turn_off_relay_if_idle).execute();
+              }
+            }
+            id(g_last_reading_is_valid) = is_valid_now;
+
+# 7-Segment Display
+display:
+  - platform: tm1637
+    id: tm1637_display
+    clk_pin: ${clk_pin}
+    dio_pin: ${dio_pin}
+    intensity: 7
+    update_interval: ${display_update_interval}
+    lambda: |-
+      if (id(ultrasonic_sensor).has_state() && !isnan(id(ultrasonic_sensor).state) && id(ultrasonic_sensor).state <= 150) {
+        it.printf("%4.0f", id(ultrasonic_sensor).state);
+      } else {
+        it.print("----");
+      }
+
+# Relay Switch
+switch:
+  - platform: gpio
+    pin: ${relay_pin}
+    id: parking_sensor_relay
+    name: "${friendly_name} Relay Switch"
+    inverted: true
+    restore_mode: RESTORE_DEFAULT_OFF
